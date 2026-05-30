@@ -1,0 +1,78 @@
+paths:
+  raw_papers: data/raw_papers.jsonl
+  raw_edges: data/raw_edges.csv
+  cleaned_papers: data/cleaned_papers.jsonl
+  graph_edges: data/graph_edges.csv
+  candidate_pairs: data/candidate_pairs.csv
+  rerank_candidates: data/rerank_candidates.csv
+  ranked_results: outputs/ranked_results.csv
+  relation_scores: outputs/relation_scores.csv
+  metrics: outputs/metrics.csv
+
+cleaning:
+  min_abstract_chars: 50
+  low_connectivity_citation_threshold: 5
+  low_connectivity_reference_threshold: 5
+
+pair_building:
+  n_targets: 50
+  candidates_per_target: 200
+  include_two_hop: true
+  max_two_hop_per_target: 100
+  negatives_per_target: 50
+  random_state: 172
+
+# Real LLM used as the constrained relation scorer + query parser.
+# DeepSeek is OpenAI-compatible, so we drive it through the openai SDK.
+# Put your key in .env as DEEPSEEK_API_KEY=...  (see .env.example)
+llm:
+  provider: deepseek
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  scorer_model: deepseek-v4-pro     # stronger judge
+  parser_model: deepseek-v4-flash   # cheaper/faster query parsing
+  max_tokens: 8192                   # headroom for R1 reasoning + answer (only emitted tokens are billed)
+  temperature: 0.0                  # ignored by reasoner models
+  concurrency: 8
+  max_retries: 5
+  timeout: 180
+  cache_dir: outputs/llm_cache
+  force_mock: false                 # true => skip the API and use the deterministic fallback
+
+ranking:
+  desired_relation: extension       # critique | extension | application | background
+  top_k: 20                         # final recommendations shown/evaluated per target
+  rerank_top_k: 30                  # stage-1 prefilter: LLM scores this many candidates per target
+  max_rerank_targets: null          # cap #targets sent to the LLM (null = all). Use e.g. 5 for a cheap demo.
+  mmr_lambda: 0.75
+  weights:
+    semantic: 0.30
+    graph: 0.20
+    relation: 0.30
+    citation: 0.08
+    novelty: 0.05
+    diversity: 0.07
+
+# Zero-manual-label adaptation. The LLM judge's satisfaction/confidence become
+# pseudo labels; the pipeline searches for ranking weights that improve pseudo
+# nDCG/MRR/reward, then reruns retrieval with the learned weights.
+self_training:
+  enabled: true
+  iterations: 2
+  search_trials: 80
+  target_k: 10
+  reward_threshold: 0.55
+  min_improvement: 0.001
+  regularization: 0.02
+  random_state: 172
+  weight_bounds:
+    semantic: [0.05, 0.60]
+    graph: [0.05, 0.45]
+    relation: [0.10, 0.55]
+    citation: [0.00, 0.25]
+    novelty: [0.00, 0.20]
+    diversity: [0.00, 0.20]
+
+evaluation:
+  k_values: [5, 10, 20]
+  positive_labels: [critique, extension, application]

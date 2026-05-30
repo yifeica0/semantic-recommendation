@@ -1,0 +1,194 @@
+# Relation-Aware Citation Recommender
+
+This project does the following: given a target paper and a desired relation type
+(`critique`, `extension`, `application`, `background`), it finds candidate papers
+from the citation graph, uses an LLM judge to assess the true relation between each
+candidate and the target, then automatically tunes the ranking model and outputs
+the recommendations along with explanations.
+
+The main path requires no manual annotation. The LLM judge's `relation_satisfaction`
+and `confidence` are treated as pseudo labels/rewards, used to iteratively tune the
+ranking weights.
+
+## Project Layout
+
+```text
+run_pipeline.py              # thin CLI entrypoint
+src/run_pipeline.py          # end-to-end pipeline orchestration
+src/llm_client.py            # only place that talks to an API
+src/relation_scorer.py       # relation prompt, response parsing, fallback scorer
+src/rankers.py               # retrieval features + final ranking
+src/self_training.py         # zero-manual-label pseudo-label tuning
+src/query_parser.py          # optional natural-language query parsing
+src/explain.py               # non-LLM recommendation explanations
+scripts/                     # small optional utilities only
+config.yaml                  # full run config
+config_test.yaml             # smaller sample config
+```
+
+`src/llm_client.py` is the only API transport layer: it handles the OpenAI-compatible
+chat call, caching, retry, and concurrency. The self-training and evaluation modules
+make no extra LLM calls — they only consume judge scores that have already been
+computed.
+
+## Pipeline
+
+```text
+raw_papers.jsonl + raw_edges.csv
+        |
+        v
+clean papers / edges
+        |
+        v
+optional query parse: natural language -> target_paper_id + desired_relation
+        |
+        v
+build candidate pairs from citation graph
+        |
+        v
+Stage 1 retrieval, cheap features for all candidates
+  - TF-IDF semantic similarity
+  - citation graph proximity
+  - citation count
+  - novelty
+        |
+        v
+top rerank_top_k candidates per target
+        |
+        v
+Stage 2 LLM judge
+  - predicted_relation
+  - relation_satisfaction
+  - relation_confidence
+  - relation_reason
+        |
+        v
+self-training loop
+  - convert judge scores -> pseudo reward
+  - search ranking weights
+  - reretrieve with learned weights
+  - stop on max iterations or tiny improvement
+        |
+        v
+final ranking + citation-grounded explanations + pseudo metrics
+```
+
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+`.env`:
+
+```text
+DEEPSEEK_API_KEY=sk-your-deepseek-key
+```
+
+DeepSeek is an OpenAI-compatible API; the default configuration is in the `llm:`
+block of `config.yaml`:
+
+```yaml
+llm:
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  scorer_model: deepseek-v4-pro
+  parser_model: deepseek-v4-flash
+```
+
+If no API key is available, the pipeline automatically falls back to a heuristic
+scorer, which makes it easy to run locally. For genuine zero-manual-label iteration,
+however, `--mode llm` is recommended.
+
+## Run
+
+Full automatic pipeline:
+
+```bash
+python run_pipeline.py --config config.yaml --mode llm
+```
+
+Specify the target and relation in natural language:
+
+```bash
+python run_pipeline.py --config config.yaml --mode llm \
+  --query "recent papers that critique Attention is All You Need"
+```
+
+Cheaper debugging:
+
+```bash
+python run_pipeline.py --config config_test.yaml --mode heuristic --max-targets 3
+python run_pipeline.py --config config.yaml --mode llm --max-targets 3 --iterations 1
+```
+
+Disable automatic weight tuning:
+
+```bash
+python run_pipeline.py --config config.yaml --mode llm --no-self-train
+```
+
+## Configuration
+
+The main blocks to look at:
+
+- `ranking.desired_relation`: the default relation to search for.
+- `ranking.rerank_top_k`: the number of candidates per target sent to the LLM judge.
+- `ranking.weights`: initial ranking weights.
+- `self_training.enabled`: whether to enable automatic iterative weight tuning.
+- `self_training.iterations`: max number of judge -> tune -> reretrieve rounds.
+- `self_training.search_trials`: how many weight sets to randomly search per round.
+- `self_training.weight_bounds`: prevents weights from collapsing onto a single feature.
+- `llm.force_mock`: when true, forces the pipeline not to use the API.
+
+## Outputs
+
+The main results are in `outputs/`:
+
+- `recommendations.md`: the recommendation list and explanations — look at this first.
+- `ranked_results.csv`: per-candidate features, LLM judge, final score, and rank.
+- `relation_scores.csv`: LLM judge output.
+- `learned_weights.json`: weights after self-training.
+- `self_training_metrics.csv`: the pseudo objective before and after tuning each round.
+- `pseudo_qrels.csv`: pseudo qrels generated by the LLM judge.
+- `pseudo_metrics.csv`: Precision/MRR/nDCG/reward based on the pseudo labels.
+- `metrics.csv`: if the original pairs have a `label`, traditional ranking metrics go here.
+
+## Scripts
+
+The main pipeline does not depend on `scripts/`. Only two small utilities are kept here:
+
+```bash
+python scripts/make_sample.py
+python scripts/evaluate_citation_reconstruction.py --config config.yaml
+```
+
+`make_sample.py` generates sample data; `evaluate_citation_reconstruction.py` uses
+the one-hop edges of the citation graph as a manual-label-free sanity check.
+
+## Data Format
+
+`data/raw_papers.jsonl`, one paper per line:
+
+```json
+{"paperId":"P1","title":"...","abstract":"...","year":2024,"citationCount":12,"referenceCount":30}
+```
+
+Required fields: `paperId`, `title`, `abstract`.
+
+`data/raw_edges.csv`:
+
+```csv
+source_paper_id,target_paper_id,edge_type,hop,citation_path
+P1,P2,citation,1,P1|P2
+P1,P3,reference,1,P1|P3
+```
+
+## Notes
+
+By default, this version treats the LLM judge as an automatic supervision signal,
+so manual annotation is no longer required. Manual qrels can still serve as a stricter
+final evaluation, but they are optional, not part of the main pipeline.

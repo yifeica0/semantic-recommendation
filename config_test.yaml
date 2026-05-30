@@ -1,0 +1,70 @@
+paths:
+  raw_papers: data/sample_papers.jsonl
+  raw_edges: data/sample_edges.csv
+  cleaned_papers: data/sample_cleaned_papers.jsonl
+  graph_edges: data/sample_graph_edges.csv
+  candidate_pairs: data/sample_candidate_pairs.csv
+  rerank_candidates: data/sample_rerank_candidates.csv
+  ranked_results: outputs/sample_ranked_results.csv
+  relation_scores: outputs/sample_relation_scores.csv
+  metrics: outputs/sample_metrics.csv
+
+cleaning:
+  min_abstract_chars: 50
+  low_connectivity_citation_threshold: 5
+  low_connectivity_reference_threshold: 5
+
+pair_building:
+  n_targets: 8
+  candidates_per_target: 60
+  include_two_hop: true
+  max_two_hop_per_target: 40
+  negatives_per_target: 10
+  random_state: 172
+
+llm:
+  provider: deepseek
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  scorer_model: deepseek-v4-pro
+  parser_model: deepseek-v4-flash
+  max_tokens: 8192
+  concurrency: 8
+  max_retries: 5
+  cache_dir: outputs/llm_cache
+  force_mock: false
+
+ranking:
+  desired_relation: extension
+  top_k: 10
+  rerank_top_k: 20
+  max_rerank_targets: null
+  mmr_lambda: 0.75
+  weights:
+    semantic: 0.30
+    graph: 0.20
+    relation: 0.30
+    citation: 0.08
+    novelty: 0.05
+    diversity: 0.07
+
+self_training:
+  enabled: true
+  iterations: 2
+  search_trials: 30
+  target_k: 5
+  reward_threshold: 0.55
+  min_improvement: 0.001
+  regularization: 0.02
+  random_state: 172
+  weight_bounds:
+    semantic: [0.05, 0.60]
+    graph: [0.05, 0.45]
+    relation: [0.10, 0.55]
+    citation: [0.00, 0.25]
+    novelty: [0.00, 0.20]
+    diversity: [0.00, 0.20]
+
+evaluation:
+  k_values: [5, 10]
+  positive_labels: [critique, extension, application]
