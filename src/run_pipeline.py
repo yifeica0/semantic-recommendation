@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from types import SimpleNamespace
 import json
 from typing import Optional
 
@@ -35,6 +36,62 @@ from src.self_training import (
 
 def build_client(cfg: ProjectConfig) -> LLMClient:
     return LLMClient(LLMConfig.from_dict(cfg.get("llm", {})), base_dir=cfg.base_dir)
+
+
+def run_query_for_frontend(
+    cfg: ProjectConfig,
+    client: LLMClient,
+    cleaned: pd.DataFrame,
+    cleaned_edges: pd.DataFrame,
+    query: str,
+    *,
+    top_k: int = 10,
+    use_learned_weights: bool = True,
+    fast_features: bool = True,
+    max_targets: int | None = 1,
+    desired_relation: str | None = None,
+) -> tuple[dict, pd.DataFrame]:
+    """Run the same query pipeline stages used by CLI mode for frontend/API calls."""
+
+    query_args = SimpleNamespace(
+        use_learned_weights=bool(use_learned_weights),
+        max_targets=max_targets,
+        fast_features=bool(fast_features),
+    )
+
+    parsed = parse_query(query, cleaned, client)
+    final_relation = desired_relation or parsed.desired_relation
+    target_ids = [parsed.target_paper_id] if parsed.target_paper_id else None
+
+    pairs = build_candidate_pairs(
+        cleaned,
+        cleaned_edges,
+        target_ids=target_ids,
+        n_targets=cfg.get("pair_building.n_targets", 50),
+        candidates_per_target=cfg.get("pair_building.candidates_per_target", 200),
+        include_two_hop=cfg.get("pair_building.include_two_hop", True),
+        max_two_hop_per_target=cfg.get("pair_building.max_two_hop_per_target", 100),
+        negatives_per_target=cfg.get("pair_building.negatives_per_target", 50),
+        random_state=cfg.get("pair_building.random_state", 172),
+    )
+    if pairs.empty:
+        return parsed.to_dict(), pairs
+
+    weights = _load_weights(query_args, cfg)
+    survivors, text_model = _retrieve_survivors(pairs, cleaned, cfg, query_args, weights)
+    relation_scores = _score_survivors(survivors, final_relation, client)
+    ranked = finalize_ranking(
+        survivors,
+        relation_scores=relation_scores,
+        desired_relation=final_relation,
+        weights=weights,
+        mmr_lambda=cfg.get("ranking.mmr_lambda", 0.75),
+        text_model=text_model,
+    )
+    ranked["desired_relation"] = final_relation
+    ranked = build_explanations(ranked, cleaned, desired_relation=final_relation)
+    ranked = ranked.sort_values(["target_paper_id", "rank"]).head(int(top_k)).reset_index(drop=True)
+    return parsed.to_dict(), ranked
 
 
 def main() -> None:

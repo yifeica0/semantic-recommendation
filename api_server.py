@@ -18,6 +18,7 @@ from src.pair_builder import build_candidate_pairs
 from src.query_parser import parse_query
 from src.rankers import RankingWeights, finalize_ranking, retrieve_candidates, rank_candidate_pairs
 from src.relation_scorer import score_pairs
+from src.run_pipeline import run_query_for_frontend
 from src.self_training import normalize_weights
 
 
@@ -75,81 +76,19 @@ class RecommendationApp:
             self.ensure_loaded()
         if self.papers is None or self.edges is None:
             return {"query": query, "parsed": None, "results": [], "error": self._load_error or "data not loaded"}
-
-        parsed = parse_query(query, self.papers, self.client)
-        desired_relation = parsed.desired_relation
-        target_ids = [parsed.target_paper_id] if parsed.target_paper_id else None
-
-        # Allow interactive (frontend) mode to be faster by capping rerank size/targets.
-        rerank_top_k_cfg = int(self.cfg.get("ranking.rerank_top_k", 30))
-        rerank_top_k = rerank_top_k_cfg
-        if interactive:
-            rerank_top_k = min(rerank_top_k_cfg, 6)
-
-        pairs = build_candidate_pairs(
-            self.papers,
-            self.edges,
-            target_ids=target_ids,
-            n_targets=self.cfg.get("pair_building.n_targets", 50),
-            candidates_per_target=self.cfg.get("pair_building.candidates_per_target", 200),
-            include_two_hop=self.cfg.get("pair_building.include_two_hop", True),
-            max_two_hop_per_target=self.cfg.get("pair_building.max_two_hop_per_target", 100),
-            negatives_per_target=self.cfg.get("pair_building.negatives_per_target", 50),
-            random_state=self.cfg.get("pair_building.random_state", 172),
+        max_targets_cfg = self.cfg.get("ranking.max_rerank_targets")
+        max_targets = int(max_targets_cfg) if max_targets_cfg is not None else (3 if interactive else None)
+        parsed_dict, ranked = run_query_for_frontend(
+            cfg=self.cfg,
+            client=self.client,
+            cleaned=self.papers,
+            cleaned_edges=self.edges,
+            query=query,
+            top_k=top_k,
+            use_learned_weights=True,
+            fast_features=fast,
+            max_targets=max_targets,
         )
-
-        if pairs.empty:
-            return {"query": query, "parsed": parsed.to_dict(), "results": []}
-        # Optionally allow loading learned weights from a previous self-training run
-        learned_path = self.cfg.get("ranking.learned_weights_path")
-        if learned_path:
-            try:
-                lp = Path(learned_path)
-                if not lp.is_absolute():
-                    lp = self.base_dir / learned_path
-                if lp.exists():
-                    learned = json.loads(lp.read_text(encoding="utf-8"))
-                    weights_dict = dict(self.cfg.get("ranking.weights", {}))
-                    weights_dict.update(learned)
-                    weights = normalize_weights(RankingWeights.from_dict(weights_dict))
-                else:
-                    weights = normalize_weights(RankingWeights.from_dict(self.cfg.get("ranking.weights", {})))
-            except Exception:
-                weights = normalize_weights(RankingWeights.from_dict(self.cfg.get("ranking.weights", {})))
-        else:
-            weights = normalize_weights(RankingWeights.from_dict(self.cfg.get("ranking.weights", {})))
-        # Fast path: return baseline ranking (no LLM scoring) quickly for interactive UI.
-        if fast:
-            ranked = rank_candidate_pairs(pairs, self.papers, relation_scores=None, desired_relation=desired_relation, weights=weights, mmr_lambda=self.cfg.get("ranking.mmr_lambda", 0.75), top_k=top_k)
-        else:
-            survivors, text_model = retrieve_candidates(
-                pairs,
-                self.papers,
-                weights=weights,
-                top_k=rerank_top_k,
-            )
-            # If interactive, cap the number of targets we send to the LLM to keep latency low.
-            if interactive:
-                max_targets_cfg = self.cfg.get("ranking.max_rerank_targets")
-                max_targets = int(max_targets_cfg) if max_targets_cfg is not None else 3
-                unique_targets = list(dict.fromkeys(survivors["target_paper_id"].tolist()))
-                limited_targets = set(unique_targets[:max_targets])
-                survivors = survivors[survivors["target_paper_id"].isin(limited_targets)].copy()
-            relation_scores = score_pairs(survivors, desired_relation=desired_relation, client=self.client)
-            ranked = finalize_ranking(
-                survivors,
-                relation_scores=relation_scores,
-                desired_relation=desired_relation,
-                weights=weights,
-                mmr_lambda=self.cfg.get("ranking.mmr_lambda", 0.75),
-                text_model=text_model,
-            )
-        ranked = build_explanations(ranked, self.papers, desired_relation=desired_relation)
-
-        if parsed.target_paper_id:
-            ranked = ranked[ranked["target_paper_id"] == parsed.target_paper_id].copy()
-
-        ranked = ranked.sort_values(["target_paper_id", "rank"]).head(int(top_k)).reset_index(drop=True)
         results = []
         for row in ranked.to_dict(orient="records"):
             results.append(
@@ -161,14 +100,14 @@ class RecommendationApp:
                     "abstract": row.get("candidate_abstract", ""),
                     "score": float(row.get("final_score", 0.0) or 0.0),
                     "rank": int(row.get("rank", 0) or 0),
-                    "desired_relation": row.get("desired_relation", desired_relation),
+                    "desired_relation": row.get("desired_relation", parsed_dict.get("desired_relation", "")),
                     "predicted_relation": row.get("predicted_relation", ""),
                     "relation_score": float(row.get("relation_score", 0.0) or 0.0),
                     "explanation": row.get("explanation", ""),
                 }
             )
 
-        return {"query": query, "parsed": parsed.to_dict(), "results": results}
+        return {"query": query, "parsed": parsed_dict, "results": results}
 
 
 class RecommendationHandler(BaseHTTPRequestHandler):
@@ -215,10 +154,11 @@ class RecommendationHandler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode("utf-8"))
             query = str(body.get("query", "")).strip()
             top_k = int(body.get("top_k", 10) or 10)
+            fast = bool(body.get("fast", True))
             if not query:
                 self._send_json({"query": "", "parsed": None, "results": []})
                 return
-            payload = self.app.recommend(query, top_k=top_k)
+            payload = self.app.recommend(query, top_k=top_k, fast=fast)
             self._send_json(payload)
         except Exception as exc:  # pragma: no cover - runtime guard for UI calls
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
