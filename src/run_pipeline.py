@@ -45,6 +45,16 @@ def main() -> None:
     parser.add_argument("--mode", choices=["auto", "llm", "heuristic"], default="auto",
                         help="auto: LLM if a key is present else fallback. heuristic: never call the API.")
     parser.add_argument("--max-targets", type=int, default=None, help="Cap #targets sent to the judge.")
+    parser.add_argument("--reuse-clean", action="store_true",
+                        help="Reuse already-cleaned papers/edges from disk instead of re-cleaning the raw corpus "
+                             "(query-independent; big speedup when testing many queries). Falls back to cleaning "
+                             "if the cached files are missing or empty.")
+    parser.add_argument("--fast-features", action="store_true",
+                        help="Fit TF-IDF only on the candidate pairs instead of the full corpus. "
+                             "Much faster for testing a single query; IDF is estimated from the candidate set.")
+    parser.add_argument("--use-learned-weights", action="store_true",
+                        help="Load ranking weights from outputs/learned_weights.json instead of config "
+                             "(reuse a previous self-training run; pair with --no-self-train to skip retuning).")
     parser.add_argument("--self-train", action="store_true", help="Enable zero-manual-label iterative weight tuning.")
     parser.add_argument("--no-self-train", action="store_true", help="Disable self-training even if config enables it.")
     parser.add_argument("--iterations", type=int, default=None, help="Override self_training.iterations.")
@@ -57,7 +67,7 @@ def main() -> None:
     else:
         print(f"[llm] {client.status_message()}")
 
-    cleaned, cleaned_edges = _clean_inputs(cfg)
+    cleaned, cleaned_edges = _clean_inputs(cfg, reuse=args.reuse_clean)
     query_client = None if args.mode == "heuristic" else client
     desired_relation, target_ids = _parse_query(args, cfg, cleaned, query_client)
     pairs = _build_pairs(cfg, cleaned, cleaned_edges, target_ids)
@@ -65,7 +75,7 @@ def main() -> None:
         print("      No candidate pairs (target may have no graph neighbors). Stopping.")
         return
 
-    weights = normalize_weights(RankingWeights.from_dict(cfg.get("ranking.weights", {})))
+    weights = _load_weights(args, cfg)
     self_training = _self_training_config(args, cfg)
 
     if self_training.enabled:
@@ -114,7 +124,22 @@ def main() -> None:
     print("Done. See outputs/recommendations.md for ranked, citation-grounded recommendations.")
 
 
-def _clean_inputs(cfg: ProjectConfig):
+def _nonempty(path) -> bool:
+    return path.exists() and path.stat().st_size > 0
+
+
+def _clean_inputs(cfg: ProjectConfig, reuse: bool = False):
+    cleaned_path = cfg.path("paths.cleaned_papers")
+    edges_path = cfg.path("paths.graph_edges")
+    if reuse:
+        if _nonempty(cleaned_path) and _nonempty(edges_path):
+            print(f"[1/7] Reusing cleaned papers/edges from disk (skipping clean).")
+            cleaned = read_jsonl(cleaned_path)
+            cleaned_edges = read_table(edges_path)
+            print(f"      papers={len(cleaned)} edges={len(cleaned_edges)}")
+            return cleaned, cleaned_edges
+        print("[1/7] --reuse-clean set but cached files missing/empty; cleaning from raw.")
+
     print("[1/7] Cleaning papers and edges...")
     papers = read_jsonl(cfg.path("paths.raw_papers"))
     edges = read_table(cfg.path("paths.raw_edges"))
@@ -196,6 +221,7 @@ def _retrieve_survivors(
         papers,
         weights=weights,
         top_k=cfg.get("ranking.rerank_top_k", 30),
+        full_corpus=not getattr(args, "fast_features", False),
     )
     max_targets = args.max_targets if args.max_targets is not None else cfg.get("ranking.max_rerank_targets", None)
     if max_targets:
@@ -355,6 +381,18 @@ def _metric(metrics: pd.DataFrame) -> float:
         return 0.0
     row = metrics.iloc[0]
     return float(0.70 * row["PseudoNDCG@k"] + 0.20 * row["PseudoMRR@k"] + 0.10 * row["AvgJudgeReward@k"])
+
+
+def _load_weights(args, cfg: ProjectConfig) -> RankingWeights:
+    """Ranking weights from config, or from a prior self-training run on request."""
+    if args.use_learned_weights:
+        path = cfg.base_dir / "outputs" / "learned_weights.json"
+        if path.exists():
+            learned = json.loads(path.read_text(encoding="utf-8"))
+            print(f"[weights] using learned weights from {path.name} (relation={learned.get('relation', 0):.3f})")
+            return normalize_weights(RankingWeights.from_dict(learned))
+        print(f"[weights] --use-learned-weights set but {path} missing; falling back to config.")
+    return normalize_weights(RankingWeights.from_dict(cfg.get("ranking.weights", {})))
 
 
 def _write_learned_weights(cfg: ProjectConfig, weights: RankingWeights) -> None:

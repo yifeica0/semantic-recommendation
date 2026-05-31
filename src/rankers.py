@@ -56,17 +56,24 @@ class RankingWeights:
 # --------------------------------------------------------------------------- #
 # Stage 1: features + retrieval prefilter                                     #
 # --------------------------------------------------------------------------- #
-def compute_features(pairs: pd.DataFrame, papers: pd.DataFrame) -> Tuple[pd.DataFrame, TextSimilarityModel]:
-    """Attach semantic / graph / citation / novelty features to every pair."""
+def compute_features(
+    pairs: pd.DataFrame, papers: pd.DataFrame, full_corpus: bool = True
+) -> Tuple[pd.DataFrame, TextSimilarityModel]:
+    """Attach semantic / graph / citation / novelty features to every pair.
+
+    ``full_corpus=True`` fits the TF-IDF vocabulary/IDF on every paper (stable
+    statistics, but slow on a large corpus). ``full_corpus=False`` fits only on
+    the texts in ``pairs`` — far faster for single-query inference, at the cost of
+    IDF estimated from just the candidate set.
+    """
     df = pairs.copy()
     df["target_text"] = (df["target_title"].fillna("") + ". " + df["target_abstract"].fillna("")).str.strip()
     df["candidate_text"] = (df["candidate_title"].fillna("") + ". " + df["candidate_abstract"].fillna("")).str.strip()
 
-    corpus = pd.concat([
-        papers.get("text_for_retrieval", papers["title"].fillna("") + ". " + papers["abstract"].fillna("")),
-        df["target_text"],
-        df["candidate_text"],
-    ], ignore_index=True).fillna("").astype(str)
+    fit_texts = [df["target_text"], df["candidate_text"]]
+    if full_corpus:
+        fit_texts.insert(0, papers.get("text_for_retrieval", papers["title"].fillna("") + ". " + papers["abstract"].fillna("")))
+    corpus = pd.concat(fit_texts, ignore_index=True).fillna("").astype(str)
     text_model = TextSimilarityModel.fit(corpus)
 
     df["semantic_score"] = text_model.pairwise_scores(df["target_text"], df["candidate_text"])
@@ -101,17 +108,19 @@ def retrieve_candidates(
     papers: pd.DataFrame,
     weights: Optional[RankingWeights] = None,
     top_k: Optional[int] = None,
+    full_corpus: bool = True,
 ) -> Tuple[pd.DataFrame, TextSimilarityModel]:
     """Stage 1: compute features and keep the top-K candidates per target.
 
     ``top_k=None`` keeps everything (no prefilter). Returns the survivors plus
     the fitted text model (so stage 2 can reuse its vocabulary for diversity).
+    ``full_corpus=False`` fits TF-IDF only on the pair texts (fast single-query path).
     """
     weights = weights or RankingWeights()
     if pairs.empty:
         return pairs.copy(), TextSimilarityModel.fit([""])
 
-    df, text_model = compute_features(pairs, papers)
+    df, text_model = compute_features(pairs, papers, full_corpus=full_corpus)
     df["retrieval_score"] = retrieval_score(df, weights)
     df["retrieval_rank"] = (
         df.groupby("target_paper_id")["retrieval_score"].rank(method="first", ascending=False).astype(int)
