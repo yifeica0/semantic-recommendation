@@ -32,12 +32,10 @@ llm:
   concurrency: 8
   max_retries: 5
   cache_dir: outputs/llm_cache
-  force_mock: false
-
 ranking:
   desired_relation: extension
   top_k: 10
-  rerank_top_k: 20
+  rerank_top_k: 12
   max_rerank_targets: null
   mmr_lambda: 0.75
   weights:

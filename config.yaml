@@ -16,7 +16,7 @@ cleaning:
 
 pair_building:
   n_targets: 50
-  candidates_per_target: 200
+  candidates_per_target: 120
   include_two_hop: true
   max_two_hop_per_target: 100
   negatives_per_target: 50
@@ -37,14 +37,14 @@ llm:
   max_retries: 5
   timeout: 180
   cache_dir: outputs/llm_cache
-  force_mock: false                 # true => skip the API and use the deterministic fallback
 
 ranking:
   desired_relation: extension       # critique | extension | application | background
   top_k: 20                         # final recommendations shown/evaluated per target
-  rerank_top_k: 30                  # stage-1 prefilter: LLM scores this many candidates per target
+  rerank_top_k: 12                  # stage-1 prefilter: LLM scores this many candidates per target
   max_rerank_targets: null          # cap #targets sent to the LLM (null = all). Use e.g. 5 for a cheap demo.
   mmr_lambda: 0.75
+  learned_weights_path: outputs/learned_weights.json
   weights:
     semantic: 0.30
     graph: 0.20

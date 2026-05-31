@@ -1,13 +1,9 @@
 """Relation scoring: decide how a candidate paper relates to a target paper.
 
-Two backends produce the **same output schema** so they are interchangeable:
-
-- ``LLMRelationScorer`` (the real thing): a constrained LLM judge that reads the
-  target/candidate titles+abstracts and the citation-path evidence and returns a
-  label, a continuous *satisfaction* score for the desired relation, a
-  confidence, and a short citation-grounded reason.
-- ``HeuristicRelationScorer`` (fallback): keyword counts. Used automatically when
-  no API key is configured, so the pipeline still runs end-to-end for testing.
+The pipeline requires the LLM judge. It reads the target/candidate
+titles+abstracts and the citation-path evidence and returns a label, a
+continuous *satisfaction* score for the desired relation, a confidence, and a
+short citation-grounded reason.
 
 Output columns (per target/candidate pair):
     target_paper_id, candidate_paper_id, predicted_relation,
@@ -43,69 +39,6 @@ class RelationPrediction:
     confidence: float
     reason: str
     satisfaction: Optional[float] = None  # 0..1 strength of the *desired* relation
-
-
-# --------------------------------------------------------------------------- #
-# Heuristic fallback (no API key)                                             #
-# --------------------------------------------------------------------------- #
-class HeuristicRelationScorer:
-    """Executable keyword fallback. Not meant to replace the LLM.
-
-    Used automatically when no API key is configured, so the team has a runnable
-    baseline and a debugging tool.
-    """
-
-    critique_terms = {
-        "limitation", "limitations", "fail", "fails", "failure", "error", "bias", "robustness",
-        "critique", "challenge", "challenges", "problem", "problems", "weakness", "weaknesses",
-        "inconsistent", "misleading", "hallucination", "overestimate", "underestimate",
-    }
-    extension_terms = {
-        "extend", "extends", "extension", "improve", "improves", "improved", "enhance", "enhances",
-        "build", "builds", "upon", "generalize", "generalizes", "new method", "variant", "framework",
-    }
-    application_terms = {
-        "apply", "applies", "application", "use", "uses", "case study", "experiment", "dataset",
-        "evaluation", "benchmark", "empirical", "real-world", "domain", "task",
-    }
-    background_terms = {
-        "survey", "overview", "review", "introduction", "foundation", "foundational", "background",
-        "tutorial", "taxonomy",
-    }
-
-    def score_pair(self, row: pd.Series, desired_relation: str | None = None) -> RelationPrediction:
-        text = f"{row.get('candidate_title', '')} {row.get('candidate_abstract', '')}".lower()
-        counts = {
-            "critique": self._count_terms(text, self.critique_terms),
-            "extension": self._count_terms(text, self.extension_terms),
-            "application": self._count_terms(text, self.application_terms),
-            "background": self._count_terms(text, self.background_terms),
-        }
-        best_label, best_count = max(counts.items(), key=lambda x: x[1])
-        total = sum(counts.values())
-        if best_count == 0:
-            return RelationPrediction("unrelated", 0.45, "No clear relation-specific textual signal was found.", 0.0)
-        confidence = min(0.95, 0.50 + 0.10 * best_count + 0.05 * (best_count / max(total, 1)))
-        # Soft satisfaction for the desired relation = its share of all signal.
-        satisfaction = None
-        if desired_relation is not None:
-            d = desired_relation.lower()
-            satisfaction = float(counts.get(d, 0) / total) if total > 0 else 0.0
-        return RelationPrediction(
-            best_label, float(confidence),
-            f"Detected {best_label}-related terms in the candidate abstract/title.",
-            satisfaction,
-        )
-
-    @staticmethod
-    def _count_terms(text: str, terms: set[str]) -> int:
-        count = 0
-        for term in terms:
-            if " " in term:
-                count += text.count(term)
-            else:
-                count += len(re.findall(rf"\b{re.escape(term)}\b", text))
-        return count
 
 
 # --------------------------------------------------------------------------- #
@@ -231,23 +164,6 @@ def _rows_to_frame(rows: list[dict]) -> pd.DataFrame:
     return df[cols]
 
 
-def score_pairs_heuristic(pairs: pd.DataFrame, desired_relation: str = "extension") -> pd.DataFrame:
-    scorer = HeuristicRelationScorer()
-    rows = []
-    for row in pairs.itertuples(index=False):
-        s = pd.Series(row._asdict())
-        pred = scorer.score_pair(s, desired_relation=desired_relation)
-        rows.append({
-            "target_paper_id": s.get("target_paper_id"),
-            "candidate_paper_id": s.get("candidate_paper_id"),
-            "predicted_relation": pred.label,
-            "relation_confidence": pred.confidence,
-            "relation_satisfaction": pred.satisfaction,
-            "relation_reason": pred.reason,
-        })
-    return _rows_to_frame(rows)
-
-
 def score_pairs_llm(
     pairs: pd.DataFrame,
     client: LLMClient,
@@ -283,10 +199,10 @@ def score_pairs(
     client: Optional[LLMClient] = None,
     model: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Auto-select the real LLM when available, else the heuristic fallback."""
-    if client is not None and client.available:
-        return score_pairs_llm(pairs, client, desired_relation=desired_relation, model=model)
-    return score_pairs_heuristic(pairs, desired_relation=desired_relation)
+    """Score every pair with the real LLM."""
+    if client is None or not client.available:
+        raise RuntimeError("DeepSeek-backed relation scoring requires a configured API key.")
+    return score_pairs_llm(pairs, client, desired_relation=desired_relation, model=model)
 
 
 def merge_relation_scores(

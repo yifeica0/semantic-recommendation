@@ -16,7 +16,7 @@ ranking weights.
 run_pipeline.py              # thin CLI entrypoint
 src/run_pipeline.py          # end-to-end pipeline orchestration
 src/llm_client.py            # only place that talks to an API
-src/relation_scorer.py       # relation prompt, response parsing, fallback scorer
+src/relation_scorer.py       # relation prompt and response parsing
 src/rankers.py               # retrieval features + final ranking
 src/self_training.py         # zero-manual-label pseudo-label tuning
 src/query_parser.py          # optional natural-language query parsing
@@ -99,9 +99,8 @@ llm:
   parser_model: deepseek-v4-flash
 ```
 
-If no API key is available, the pipeline automatically falls back to a heuristic
-scorer, which makes it easy to run locally. For genuine zero-manual-label iteration,
-however, `--mode llm` is recommended.
+If no API key is available, the pipeline fails fast. Set `DEEPSEEK_API_KEY`
+before running the pipeline.
 
 ## Run
 
@@ -121,7 +120,6 @@ python run_pipeline.py --config config.yaml --mode llm \
 Cheaper debugging:
 
 ```bash
-python run_pipeline.py --config config_test.yaml --mode heuristic --max-targets 3
 python run_pipeline.py --config config.yaml --mode llm --max-targets 3 --iterations 1
 ```
 
@@ -142,7 +140,7 @@ The main blocks to look at:
 - `self_training.iterations`: max number of judge -> tune -> reretrieve rounds.
 - `self_training.search_trials`: how many weight sets to randomly search per round.
 - `self_training.weight_bounds`: prevents weights from collapsing onto a single feature.
-- `llm.force_mock`: when true, forces the pipeline not to use the API.
+- `llm.api_key_env`: the environment variable that must contain the DeepSeek key.
 
 ## Outputs
 

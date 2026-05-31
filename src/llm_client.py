@@ -6,9 +6,8 @@ OpenAI or any other OpenAI-compatible endpoint by changing ``base_url`` /
 ``api_key_env`` in ``config.yaml``.
 
 Design goals:
-- **Real LLM, but safe to run without a key.** If no API key is configured the
-  client reports ``available == False`` and callers fall back to a deterministic
-  baseline, so the full pipeline still runs end-to-end (degraded) for testing.
+- **Real LLM required.** The pipeline fails fast if no API key is configured,
+    so there is no deterministic fallback path.
 - **Cheap re-runs.** Every completion is cached on disk keyed by
   (model, messages, max_tokens). Re-running the pipeline costs nothing for pairs
   already scored.
@@ -60,8 +59,6 @@ class LLMConfig:
     max_retries: int = 5
     timeout: float = 180.0
     cache_dir: str = "outputs/llm_cache"
-    # Force the deterministic fallback even if a key is present (useful for tests).
-    force_mock: bool = False
 
     @classmethod
     def from_dict(cls, d: Optional[Dict[str, Any]]) -> "LLMConfig":
@@ -87,6 +84,11 @@ class LLMClient:
                 load_dotenv(default_env if default_env.exists() else None)
 
         self.api_key = os.environ.get(self.config.api_key_env, "").strip()
+        if not self.api_key:
+            raise RuntimeError(
+                f"Missing required API key in environment variable '{self.config.api_key_env}'. "
+                f"Set it in .env to enable the DeepSeek-backed pipeline."
+            )
         self._client = None
         self._client_err: Optional[str] = None
         self._lock = threading.Lock()
@@ -97,17 +99,10 @@ class LLMClient:
     # ------------------------------------------------------------------ status
     @property
     def available(self) -> bool:
-        """True when we can actually call the API (key present, not forced mock)."""
-        return bool(self.api_key) and not self.config.force_mock
+        """True when the required API key is present."""
+        return bool(self.api_key)
 
     def status_message(self) -> str:
-        if self.config.force_mock:
-            return "LLM disabled (force_mock=true): using deterministic fallback."
-        if not self.api_key:
-            return (
-                f"No API key found in environment variable '{self.config.api_key_env}'. "
-                f"Add it to .env to enable the real LLM. Falling back to the deterministic baseline."
-            )
         return (
             f"LLM enabled: provider={self.config.provider} base_url={self.config.base_url} "
             f"scorer={self.config.scorer_model} parser={self.config.parser_model}"

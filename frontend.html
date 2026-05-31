@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Simple Search Frontend</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f2ea;
+        --panel: #fffaf2;
+        --ink: #1f2937;
+        --muted: #6b7280;
+        --accent: #0f766e;
+        --accent-soft: #d9f2ef;
+        /* bluer highlight used only for paper filters (tags) */
+        --highlight: #0f766e;
+        --border: #e5dccd;
+        --shadow: 0 18px 50px rgba(31, 41, 55, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        /* use a traditional serif for a paper-like feel while keeping colors */
+        font-family: Georgia, "Times New Roman", Times, serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 30%),
+          radial-gradient(circle at bottom right, rgba(217, 242, 239, 0.9), transparent 25%),
+          var(--bg);
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      .app {
+        width: min(920px, 100%);
+        background: rgba(255, 250, 242, 0.98);
+        border: 1px solid rgba(229, 220, 205, 0.9);
+        border-radius: 6px;
+        /* subtler shadow to feel like a printed page */
+        box-shadow: 0 6px 18px rgba(31, 41, 55, 0.06);
+        padding: 28px;
+      }
+
+      .header {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: end;
+        margin-bottom: 20px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.6rem, 3vw, 2.4rem);
+        letter-spacing: -0.03em;
+      }
+
+      p {
+        margin: 6px 0 0;
+        color: var(--muted);
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: 1fr 220px;
+        gap: 12px;
+        margin: 20px 0;
+      }
+
+      .field {
+        width: 100%;
+        border: 1px solid var(--border);
+        background: white;
+        border-radius: 6px;
+        padding: 12px 14px;
+        font-size: 1rem;
+        color: var(--ink);
+        outline: none;
+        transition: border-color 0.12s ease;
+      }
+
+      .field:focus {
+        border-color: var(--accent);
+        box-shadow: none;
+      }
+
+      .results-meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        margin: 10px 0 16px;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .results {
+        display: grid;
+        gap: 12px;
+      }
+
+      .card {
+        /* simpler, document-like rows rather than rounded panels */
+        border: none;
+        background: transparent;
+        border-bottom: 1px solid var(--border);
+        padding: 12px 0 14px 0;
+      }
+
+      /* removed highlight hover from cards to keep highlight scoped to tags */
+
+      .card-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: start;
+      }
+
+      .title {
+        margin: 0 0 6px;
+        font-size: 1.05rem;
+        font-weight: 600;
+      }
+
+      .tag {
+        display: inline-block;
+        color: var(--highlight);
+        font-size: 0.78rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        background: transparent;
+        padding: 0 6px;
+        white-space: nowrap;
+      }
+
+      .description {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.55;
+        font-size: 0.98rem;
+      }
+
+      .empty {
+        text-align: center;
+        padding: 28px 16px;
+        color: var(--muted);
+        border-top: 1px dashed var(--border);
+        background: transparent;
+      }
+
+      @media (max-width: 700px) {
+        .app {
+          padding: 20px;
+          border-radius: 20px;
+        }
+
+        .controls {
+          grid-template-columns: 1fr;
+        }
+
+        .results-meta {
+          flex-direction: column;
+          align-items: start;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <div class="header">
+        <div>
+          <h1>Computer Science Research Paper Search</h1>
+          <p>Type to search for a paper based on a specific relationship.</p>
+          <p>Example: "Find papers that apply retrieval augmented generation for scientific search."</p>
+        </div>
+      </div>
+
+      <section class="controls" aria-label="Search and filter controls">
+        <input id="searchInput" class="field" type="search" placeholder="Ask for recommendations in natural language..." aria-label="Search items" />
+      </section>
+
+      <div class="results-meta">
+        <span id="resultCount">0 results</span>
+        <span id="parseStatus">Type a query to search.</span>
+      </div>
+
+      <section id="results" class="results" aria-live="polite"></section>
+    </main>
+
+    <script>
+      const searchInput = document.getElementById("searchInput");
+      const results = document.getElementById("results");
+      const resultCount = document.getElementById("resultCount");
+      const parseStatus = document.getElementById("parseStatus");
+
+      let pending = null;
+      let corpusReady = false;
+
+      async function refreshHealth() {
+        try {
+          const resp = await fetch('/api/health');
+          if (!resp.ok) return;
+          const data = await resp.json();
+          corpusReady = Boolean(data.loaded);
+          searchInput.disabled = !corpusReady;
+          if (!corpusReady) {
+            parseStatus.textContent = data.loading ? 'Loading corpus…' : 'Preparing data…';
+            resultCount.textContent = 'Loading…';
+          }
+        } catch (_) {
+          searchInput.disabled = true;
+        }
+      }
+
+      async function doSearch() {
+        const query = searchInput.value.trim();
+        if (!query) {
+          results.innerHTML = '<div class="empty">Type a query to search.</div>';
+          resultCount.textContent = "0 results";
+          parseStatus.textContent = "Type a query to search.";
+          return;
+        }
+
+        if (!corpusReady) {
+          resultCount.textContent = 'Loading…';
+          parseStatus.textContent = 'Loading corpus…';
+          return;
+        }
+
+        resultCount.textContent = "Searching...";
+        parseStatus.textContent = "Parsing query...";
+
+        try {
+          const resp = await fetch('/api/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query, top_k: 10, fast: true }),
+          });
+          if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+          const data = await resp.json();
+          const items = data.results || [];
+          resultCount.textContent = `${items.length} result${items.length === 1 ? '' : 's'}`;
+          if (data.parsed) {
+            const target = data.parsed.target_title || data.parsed.target_reference || 'unknown target';
+            parseStatus.textContent = `Parsed target: ${target} | relation: ${data.parsed.desired_relation}`;
+          } else {
+            parseStatus.textContent = 'No parsed query available.';
+          }
+          if (items.length === 0) {
+            results.innerHTML = '<div class="empty">No items match your search.</div>';
+            return;
+          }
+          results.innerHTML = items.map(item => `\
+            <article class="card">\
+              <div class="card-top">\
+                <div>\
+                  <h2 class="title">${item.link ? `<a href="${item.link}" target="_blank" rel="noreferrer">${item.title}</a>` : item.title}</h2>\
+                  <p class="description">${item.abstract || ''}</p>\
+                </div>\
+                <span class="tag">score: ${item.score.toFixed(3)}</span>\
+              </div>\
+            </article>\
+          `).join('');
+        } catch (e) {
+          resultCount.textContent = '0 results';
+          parseStatus.textContent = 'Search failed.';
+          results.innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+        }
+      }
+
+      let debounceTimer = null;
+      function scheduleSearch() {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(doSearch, 300);
+      }
+
+      searchInput.addEventListener('input', scheduleSearch);
+      // initial empty state
+      results.innerHTML = '<div class="empty">Type a query to search.</div>';
+      searchInput.disabled = true;
+      refreshHealth();
+      setInterval(refreshHealth, 2000);
+    </script>
+  </body>
+</html>

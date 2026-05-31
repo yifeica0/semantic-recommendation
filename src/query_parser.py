@@ -13,8 +13,8 @@ into a structured object::
 The LLM extracts {target_reference, desired_relation, filters, top_k}. We then
 resolve ``target_reference`` to an actual ``paperId`` in the corpus: a 40-hex
 Semantic Scholar id is used directly; otherwise we TF-IDF match the reference
-against paper titles. When no API key is configured we fall back to a keyword
-parser so the step still runs.
+against paper titles. The pipeline requires the LLM parser and does not use a
+deterministic fallback.
 """
 
 from __future__ import annotations
@@ -81,50 +81,6 @@ def _normalize_relation(value: object, default: str = "extension") -> str:
         if token in RELATION_SYNONYMS:
             return RELATION_SYNONYMS[token]
     return default if default in VALID_RELATIONS else "extension"
-
-
-def parse_query_heuristic(query: str) -> Dict[str, Any]:
-    """Keyword fallback: detect the relation, treat the rest as the target ref."""
-    q = query.strip()
-    low = q.lower()
-    relation = "extension"
-    for kw, canon in RELATION_SYNONYMS.items():
-        if re.search(rf"\b{re.escape(kw)}\b", low):
-            relation = canon
-            break
-
-    # Strip leading intent boilerplate and quotes to isolate the target reference.
-    ref = q
-    quoted = re.findall(r"[\"'“”‘’](.+?)[\"'“”‘’]", q)
-    if quoted:
-        ref = max(quoted, key=len)
-    else:
-        ref = re.sub(
-            r"^\s*(find|show|give|list|get|recommend|search( for)?|what|which|papers?|me|all)\b",
-            "", ref, flags=re.IGNORECASE,
-        )
-        ref = re.sub(
-            r"\b(that|which|papers?|works?|studies|articles?)\b.*?\b("
-            + "|".join(map(re.escape, RELATION_SYNONYMS)) + r")\b",
-            "", ref, flags=re.IGNORECASE,
-        )
-        for kw in sorted(RELATION_SYNONYMS, key=len, reverse=True):
-            ref = re.sub(rf"\b{re.escape(kw)}\b", "", ref, flags=re.IGNORECASE)
-        ref = re.sub(r"^\s*(the|a|an|of|on|for|to)\b", "", ref, flags=re.IGNORECASE)
-
-    year_min = None
-    m = re.search(r"\b(since|after|from)\s+(19|20)\d{2}\b", low)
-    if m:
-        year_min = int(re.search(r"(19|20)\d{2}", m.group(0)).group(0))
-    elif re.search(r"\brecent\b", low):
-        year_min = 2021
-
-    return {
-        "target_reference": ref.strip(" .,:-\t"),
-        "desired_relation": relation,
-        "filters": {"year_min": year_min},
-        "top_k": 20,
-    }
 
 
 def parse_query_llm(query: str, client: LLMClient) -> Dict[str, Any]:
@@ -210,16 +166,11 @@ def parse_query(
     client: Optional[LLMClient] = None,
 ) -> ParsedQuery:
     """Parse a natural-language query and (if papers given) resolve the target."""
-    if client is not None and client.available:
-        try:
-            fields = parse_query_llm(query, client)
-            backend = "llm"
-        except Exception:
-            fields = parse_query_heuristic(query)
-            backend = "heuristic(llm-failed)"
-    else:
-        fields = parse_query_heuristic(query)
-        backend = "heuristic"
+    if client is None or not client.available:
+        raise RuntimeError("DeepSeek-backed query parsing requires a configured API key.")
+
+    fields = parse_query_llm(query, client)
+    backend = "llm"
 
     parsed = ParsedQuery(
         raw_query=query,

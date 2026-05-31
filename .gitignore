@@ -157,6 +157,17 @@ ENV/
 env.bak/
 venv.bak/
 
+# Generated corpora and pipeline outputs
+data/*.csv
+data/*.jsonl
+data/raw_papers.jsonl
+data/raw_edges.csv
+data/cleaned_papers.jsonl
+data/graph_edges.csv
+data/candidate_pairs.csv
+data/rerank_candidates.csv
+outputs/
+
 # Spyder project settings
 .spyderproject
 .spyproject

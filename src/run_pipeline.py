@@ -42,8 +42,8 @@ def main() -> None:
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--query", default=None, help="Natural-language request; parsed into target + relation.")
     parser.add_argument("--desired-relation", default=None, help="Override the desired relation.")
-    parser.add_argument("--mode", choices=["auto", "llm", "heuristic"], default="auto",
-                        help="auto: LLM if a key is present else fallback. heuristic: never call the API.")
+    parser.add_argument("--mode", choices=["llm"], default="llm",
+                        help="DeepSeek-backed mode only.")
     parser.add_argument("--max-targets", type=int, default=None, help="Cap #targets sent to the judge.")
     parser.add_argument("--reuse-clean", action="store_true",
                         help="Reuse already-cleaned papers/edges from disk instead of re-cleaning the raw corpus "
@@ -62,10 +62,7 @@ def main() -> None:
 
     cfg = load_config(args.config)
     client = build_client(cfg)
-    if args.mode == "heuristic":
-        print("[llm] API calls disabled by --mode heuristic.")
-    else:
-        print(f"[llm] {client.status_message()}")
+    print(f"[llm] {client.status_message()}")
 
     cleaned, cleaned_edges = _clean_inputs(cfg, reuse=args.reuse_clean)
     query_client = None if args.mode == "heuristic" else client
@@ -98,7 +95,7 @@ def main() -> None:
         print(f"      {len(survivors)} survivors across {survivors['target_paper_id'].nunique()} targets")
 
         print(f"[5/7] Stage 2: relation judging (mode={args.mode}, relation='{desired_relation}')...")
-        relation_scores = _score_survivors(survivors, desired_relation, client, args.mode)
+        relation_scores = _score_survivors(survivors, desired_relation, client)
         write_table(relation_scores, cfg.path("paths.relation_scores"))
 
         print("[6/7] Final ranking + explanations...")
@@ -235,12 +232,8 @@ def _score_survivors(
     survivors: pd.DataFrame,
     desired_relation: str,
     client: LLMClient,
-    mode: str,
 ) -> pd.DataFrame:
-    use_client = None if mode == "heuristic" else client
-    if mode == "llm" and not client.available:
-        print(f"      WARNING: --mode llm but no API key; using fallback. {client.status_message()}")
-    return score_pairs(survivors, desired_relation=desired_relation, client=use_client)
+    return score_pairs(survivors, desired_relation=desired_relation, client=client)
 
 
 def _run_self_training(
@@ -263,7 +256,7 @@ def _run_self_training(
         survivors, text_model = _retrieve_survivors(pairs, papers, cfg, args, current_weights)
         final_text_model = text_model
         relation_scores = _score_missing_survivors(
-            survivors, relation_scores, desired_relation, client, args.mode
+            survivors, relation_scores, desired_relation, client
         )
         write_table(relation_scores, cfg.path("paths.relation_scores"))
 
@@ -323,7 +316,7 @@ def _run_self_training(
     print("      final pass with learned weights")
     final_survivors, final_text_model = _retrieve_survivors(pairs, papers, cfg, args, current_weights)
     relation_scores = _score_missing_survivors(
-        final_survivors, relation_scores, desired_relation, client, args.mode
+        final_survivors, relation_scores, desired_relation, client
     )
     write_table(relation_scores, cfg.path("paths.relation_scores"))
 
@@ -356,11 +349,10 @@ def _score_missing_survivors(
     existing_scores: Optional[pd.DataFrame],
     desired_relation: str,
     client: LLMClient,
-    mode: str,
 ) -> pd.DataFrame:
     keys = ["target_paper_id", "candidate_paper_id"]
     if existing_scores is None or existing_scores.empty:
-        new_scores = _score_survivors(survivors, desired_relation, client, mode)
+        new_scores = _score_survivors(survivors, desired_relation, client)
         return merge_relation_score_frames(existing_scores, new_scores)
 
     scored_keys = existing_scores[keys].drop_duplicates().copy()
@@ -372,7 +364,7 @@ def _score_missing_survivors(
         return existing_scores
 
     print(f"        judge checkpoint: scoring {len(missing)} missing / {len(survivors)} survivors")
-    new_scores = _score_survivors(missing, desired_relation, client, mode)
+    new_scores = _score_survivors(missing, desired_relation, client)
     return merge_relation_score_frames(existing_scores, new_scores)
 
 
